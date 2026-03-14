@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """
-PHASE 30.1 - Hypothesis Pool Engine API Tests
+PHASE 30.1 & 30.2 - Hypothesis Pool & Ranking Engine API Tests
 
-Comprehensive testing of Hypothesis Pool Engine API endpoints:
+Comprehensive testing of:
+
+PHASE 30.1 - Hypothesis Pool Engine API endpoints:
 - GET /api/v1/hypothesis/pool/{symbol} - returns pool of competing hypotheses
 - GET /api/v1/hypothesis/pool/summary/{symbol} - returns pool statistics
 - GET /api/v1/hypothesis/pool/history/{symbol} - returns pool history
 - POST /api/v1/hypothesis/pool/recompute/{symbol} - recomputes pool
 
+PHASE 30.2 - Hypothesis Ranking Engine API endpoints:
+- GET /api/v1/hypothesis/ranked/{symbol} - returns ranked pool with diversification
+- GET /api/v1/hypothesis/ranked/history/{symbol} - returns ranked pool history
+- POST /api/v1/hypothesis/ranked/recompute/{symbol} - recomputes ranked pool
+
 Tests verify:
 1. Pool has maximum 5 hypotheses
 2. Hypotheses sorted by ranking_score descending
 3. top_hypothesis is first in pool
-4. pool_confidence is mean of top 3 confidences
-5. pool_reliability is mean of all reliabilities
-6. Filtering: confidence > 0.30, reliability > 0.25, execution != UNFAVORABLE
-7. ranking_score = 0.50*confidence + 0.30*reliability + 0.20*execution_score
+4. Duplicate suppression - only strongest of same type retained
+5. Dominance penalty applied when ≥3 hypotheses in same direction (×0.92)
+6. Diversity penalty applied when structural scores too similar (×0.95)
+7. directional_balance returned in response
+8. ranking_metadata with duplicates_removed, dominance_penalty_applied, diversity_penalties_applied
+9. Pool confidence and reliability calculations
+10. Filtering and ranking score calculations
 """
 
 import requests
@@ -48,6 +58,12 @@ class HypothesisPoolAPITester:
         self.RANKING_WEIGHT_RELIABILITY = 0.30
         self.RANKING_WEIGHT_EXECUTION = 0.20
         self.POOL_CONFIDENCE_TOP_N = 3
+        
+        # Ranking Engine constants (PHASE 30.2)
+        self.DOMINANCE_THRESHOLD = 3
+        self.DOMINANCE_PENALTY = 0.92
+        self.SIMILARITY_THRESHOLD = 0.05
+        self.DIVERSITY_PENALTY = 0.95
 
     def log_test(self, name: str, passed: bool, details: str = ""):
         """Log test result."""
@@ -588,16 +604,408 @@ class HypothesisPoolAPITester:
         self.log_test("12. NO_EDGE fallback", True)
         return True
 
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 30.2 - Hypothesis Ranking Engine Tests  
+    # ═══════════════════════════════════════════════════════════════
+
+    def test_ranked_pool_btc_endpoint(self):
+        """Test 13: GET /api/v1/hypothesis/ranked/BTC - returns ranked pool with diversification."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/ranked/BTC')
+        
+        if not success:
+            self.log_test("13. Ranked Pool BTC endpoint", False, error)
+            return False
+
+        # Check required fields according to RankedHypothesisPool
+        required_fields = [
+            'symbol', 'hypotheses', 'top_hypothesis',
+            'directional_balance', 'pool_confidence', 'pool_reliability', 
+            'pool_size', 'ranking_metadata', 'created_at'
+        ]
+        
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            self.log_test("13. Ranked Pool BTC endpoint", False, f"Missing fields: {missing_fields}")
+            return False
+
+        # Validate ranking_metadata structure
+        ranking_metadata = data.get('ranking_metadata', {})
+        required_metadata = ['duplicates_removed', 'dominance_penalty_applied', 'diversity_penalties_applied']
+        missing_metadata = [field for field in required_metadata if field not in ranking_metadata]
+        
+        if missing_metadata:
+            self.log_test("13. Ranked Pool BTC endpoint", False, f"Missing ranking metadata: {missing_metadata}")
+            return False
+
+        # Validate directional_balance structure
+        directional_balance = data.get('directional_balance', {})
+        expected_directions = ['LONG', 'SHORT', 'NEUTRAL']
+        for direction in expected_directions:
+            if direction not in directional_balance:
+                self.log_test("13. Ranked Pool BTC endpoint", False, f"Missing direction in balance: {direction}")
+                return False
+            if not isinstance(directional_balance[direction], int) or directional_balance[direction] < 0:
+                self.log_test("13. Ranked Pool BTC endpoint", False, f"Invalid balance for {direction}: {directional_balance[direction]}")
+                return False
+
+        self.log_test("13. Ranked Pool BTC endpoint", True)
+        return True
+
+    def test_ranked_pool_sorting(self):
+        """Test 14: Ranked hypotheses sorted by ranking_score descending."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/ranked/ETH')
+        
+        if not success:
+            self.log_test("14. Ranked pool sorting", False, f"Failed to get ETH ranked data: {error}")
+            return False
+
+        hypotheses = data.get('hypotheses', [])
+        
+        if len(hypotheses) < 2:
+            self.log_test("14. Ranked pool sorting", True, "Pool has less than 2 hypotheses, cannot verify sorting")
+            return True
+
+        # Check if sorted in descending order
+        for i in range(len(hypotheses) - 1):
+            current_score = hypotheses[i].get('ranking_score', 0)
+            next_score = hypotheses[i + 1].get('ranking_score', 0)
+            
+            if current_score < next_score:
+                self.log_test("14. Ranked pool sorting", False, 
+                             f"Ranked hypotheses not sorted by ranking_score descending: {current_score} < {next_score} at position {i}")
+                return False
+
+        self.log_test("14. Ranked pool sorting", True)
+        return True
+
+    def test_directional_balance(self):
+        """Test 15: directional_balance calculation and return."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/ranked/{symbol}')
+            
+            if not success:
+                self.log_test("15. Directional balance", False, f"Failed to get {symbol} ranked data: {error}")
+                return False
+
+            directional_balance = data.get('directional_balance', {})
+            hypotheses = data.get('hypotheses', [])
+            
+            # Count actual directions in hypotheses
+            actual_counts = {'LONG': 0, 'SHORT': 0, 'NEUTRAL': 0}
+            for hypothesis in hypotheses:
+                direction = hypothesis.get('directional_bias', 'NEUTRAL')
+                if direction in actual_counts:
+                    actual_counts[direction] += 1
+                else:
+                    actual_counts['NEUTRAL'] += 1
+            
+            # Compare with directional_balance
+            for direction in ['LONG', 'SHORT', 'NEUTRAL']:
+                balance_count = directional_balance.get(direction, 0)
+                if balance_count != actual_counts[direction]:
+                    self.log_test("15. Directional balance", False, 
+                                 f"{symbol}: {direction} balance mismatch - expected {actual_counts[direction]}, got {balance_count}")
+                    return False
+
+        self.log_test("15. Directional balance", True)
+        return True
+
+    def test_ranking_metadata_structure(self):
+        """Test 16: ranking_metadata contains duplicates_removed, dominance_penalty_applied, diversity_penalties_applied."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/ranked/BTC')
+        
+        if not success:
+            self.log_test("16. Ranking metadata structure", False, f"Failed to get BTC ranked data: {error}")
+            return False
+
+        ranking_metadata = data.get('ranking_metadata', {})
+        
+        # Check duplicates_removed is integer >= 0
+        duplicates_removed = ranking_metadata.get('duplicates_removed', -1)
+        if not isinstance(duplicates_removed, int) or duplicates_removed < 0:
+            self.log_test("16. Ranking metadata structure", False, 
+                         f"duplicates_removed should be non-negative integer, got: {duplicates_removed}")
+            return False
+
+        # Check dominance_penalty_applied is boolean
+        dominance_penalty_applied = ranking_metadata.get('dominance_penalty_applied')
+        if not isinstance(dominance_penalty_applied, bool):
+            self.log_test("16. Ranking metadata structure", False, 
+                         f"dominance_penalty_applied should be boolean, got: {type(dominance_penalty_applied)}")
+            return False
+
+        # Check diversity_penalties_applied is integer >= 0
+        diversity_penalties_applied = ranking_metadata.get('diversity_penalties_applied', -1)
+        if not isinstance(diversity_penalties_applied, int) or diversity_penalties_applied < 0:
+            self.log_test("16. Ranking metadata structure", False, 
+                         f"diversity_penalties_applied should be non-negative integer, got: {diversity_penalties_applied}")
+            return False
+
+        self.log_test("16. Ranking metadata structure", True)
+        return True
+
+    def test_max_pool_size_ranked(self):
+        """Test 17: Ranked pool respects max 5 hypotheses limit."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/ranked/{symbol}')
+            
+            if not success:
+                self.log_test("17. Max pool size ranked", False, f"Failed to get {symbol} ranked data: {error}")
+                return False
+
+            hypotheses = data.get('hypotheses', [])
+            pool_size = data.get('pool_size', 0)
+            
+            if len(hypotheses) > self.MAX_POOL_SIZE:
+                self.log_test("17. Max pool size ranked", False, 
+                             f"{symbol}: Ranked pool exceeds max size {self.MAX_POOL_SIZE}, got {len(hypotheses)}")
+                return False
+                
+            if pool_size != len(hypotheses):
+                self.log_test("17. Max pool size ranked", False, 
+                             f"{symbol}: pool_size ({pool_size}) doesn't match hypotheses length ({len(hypotheses)})")
+                return False
+
+        self.log_test("17. Max pool size ranked", True)
+        return True
+
+    def test_ranked_pool_history_endpoint(self):
+        """Test 18: GET /api/v1/hypothesis/ranked/history/{symbol} - returns ranked pool history."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/ranked/history/ETH?limit=10')
+        
+        if not success:
+            self.log_test("18. Ranked pool history endpoint", False, error)
+            return False
+
+        # Check history structure
+        required_fields = ['symbol', 'pools', 'total']
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            self.log_test("18. Ranked pool history endpoint", False, f"Missing fields: {missing_fields}")
+            return False
+
+        # Validate history array
+        pools = data.get('pools', [])
+        if not isinstance(pools, list):
+            self.log_test("18. Ranked pool history endpoint", False, "pools should be an array")
+            return False
+            
+        # Check total matches array length
+        if data.get('total') != len(pools):
+            self.log_test("18. Ranked pool history endpoint", False, "total doesn't match pools array length")
+            return False
+
+        # If we have history records, validate first one
+        if pools:
+            first_pool = pools[0]
+            required_pool_fields = [
+                'top_hypothesis', 'directional_balance', 'pool_size', 'pool_confidence', 
+                'pool_reliability', 'duplicates_removed', 'dominance_penalty_applied', 
+                'diversity_penalties_applied', 'created_at'
+            ]
+            
+            missing_pool_fields = [field for field in required_pool_fields if field not in first_pool]
+            if missing_pool_fields:
+                self.log_test("18. Ranked pool history endpoint", False, f"History pool missing fields: {missing_pool_fields}")
+                return False
+
+        self.log_test("18. Ranked pool history endpoint", True)
+        return True
+
+    def test_ranked_pool_recompute_endpoint(self):
+        """Test 19: POST /api/v1/hypothesis/ranked/recompute/{symbol} - recomputes ranked pool."""
+        success, data, error = self.test_api_call('POST', 'api/v1/hypothesis/ranked/recompute/SOL')
+        
+        if not success:
+            self.log_test("19. Ranked pool recompute endpoint", False, error)
+            return False
+
+        # Check recompute response structure
+        required_fields = [
+            'status', 'symbol', 'hypotheses', 'top_hypothesis',
+            'directional_balance', 'pool_size', 'ranking_metadata', 'computed_at'
+        ]
+        
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            self.log_test("19. Ranked pool recompute endpoint", False, f"Missing fields: {missing_fields}")
+            return False
+
+        # Check status is ok
+        if data.get('status') != 'ok':
+            self.log_test("19. Ranked pool recompute endpoint", False, f"Expected status 'ok', got '{data.get('status')}'")
+            return False
+            
+        # Check symbol is SOL
+        if data.get('symbol') != 'SOL':
+            self.log_test("19. Ranked pool recompute endpoint", False, f"Expected symbol 'SOL', got '{data.get('symbol')}'")
+            return False
+
+        # Validate recompute response has ranking metadata
+        ranking_metadata = data.get('ranking_metadata', {})
+        if 'duplicates_removed' not in ranking_metadata:
+            self.log_test("19. Ranked pool recompute endpoint", False, "Missing duplicates_removed in ranking_metadata")
+            return False
+
+        if 'dominance_penalty_applied' not in ranking_metadata:
+            self.log_test("19. Ranked pool recompute endpoint", False, "Missing dominance_penalty_applied in ranking_metadata")
+            return False
+
+        if 'diversity_penalties_applied' not in ranking_metadata:
+            self.log_test("19. Ranked pool recompute endpoint", False, "Missing diversity_penalties_applied in ranking_metadata")
+            return False
+
+        self.log_test("19. Ranked pool recompute endpoint", True)
+        return True
+
+    def test_dominance_penalty_logic(self):
+        """Test 20: Verify dominance penalty is applied when ≥3 hypotheses in same direction."""
+        # Generate multiple pools to find one with dominance
+        symbols = ['BTC', 'ETH', 'SOL']
+        dominance_found = False
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/ranked/{symbol}')
+            
+            if not success:
+                continue
+
+            hypotheses = data.get('hypotheses', [])
+            ranking_metadata = data.get('ranking_metadata', {})
+            dominance_penalty_applied = ranking_metadata.get('dominance_penalty_applied', False)
+            
+            # Count directions
+            direction_counts = {'LONG': 0, 'SHORT': 0, 'NEUTRAL': 0}
+            for hypothesis in hypotheses:
+                direction = hypothesis.get('directional_bias', 'NEUTRAL')
+                if direction in direction_counts:
+                    direction_counts[direction] += 1
+                else:
+                    direction_counts['NEUTRAL'] += 1
+            
+            # Check if any direction has >= 3 hypotheses
+            has_dominance = any(count >= self.DOMINANCE_THRESHOLD for count in direction_counts.values())
+            
+            if has_dominance:
+                dominance_found = True
+                if not dominance_penalty_applied:
+                    self.log_test("20. Dominance penalty logic", False, 
+                                 f"{symbol}: Has dominance ({direction_counts}) but penalty not applied")
+                    return False
+                # If dominance penalty is applied, we can't easily verify the exact score changes
+                # since we don't have the original scores, but the metadata indicates it was applied
+                break
+
+        if not dominance_found:
+            self.log_test("20. Dominance penalty logic", True, "No dominance scenario found to test penalty")
+        else:
+            self.log_test("20. Dominance penalty logic", True)
+        return True
+
+    def test_diversity_penalty_logic(self):
+        """Test 21: Verify diversity penalty is applied when structural scores are too similar."""
+        # Try multiple symbols to find pools with similar structural scores
+        symbols = ['BTC', 'ETH', 'SOL']
+        diversity_penalty_found = False
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/ranked/{symbol}')
+            
+            if not success:
+                continue
+
+            hypotheses = data.get('hypotheses', [])
+            ranking_metadata = data.get('ranking_metadata', {})
+            diversity_penalties_applied = ranking_metadata.get('diversity_penalties_applied', 0)
+            
+            if len(hypotheses) < 2:
+                continue
+                
+            # Check for similar structural scores
+            structural_scores = [h.get('structural_score', 0) for h in hypotheses]
+            has_similarity = False
+            
+            for i in range(len(structural_scores)):
+                for j in range(i + 1, len(structural_scores)):
+                    diff = abs(structural_scores[i] - structural_scores[j])
+                    if diff < self.SIMILARITY_THRESHOLD:
+                        has_similarity = True
+                        break
+                if has_similarity:
+                    break
+            
+            if has_similarity:
+                diversity_penalty_found = True
+                if diversity_penalties_applied == 0:
+                    self.log_test("21. Diversity penalty logic", False, 
+                                 f"{symbol}: Has similarity but no diversity penalties applied")
+                    return False
+                break
+
+        if not diversity_penalty_found:
+            self.log_test("21. Diversity penalty logic", True, "No diversity penalty scenario found to test")
+        else:
+            self.log_test("21. Diversity penalty logic", True)
+        return True
+
+    def test_duplicate_suppression_logic(self):
+        """Test 22: Verify duplicate suppression removes weaker hypotheses of same type."""
+        # Try multiple recomputes to generate scenarios with potential duplicates
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            # Force recompute to potentially generate new data
+            recompute_success, recompute_data, _ = self.test_api_call('POST', f'api/v1/hypothesis/ranked/recompute/{symbol}')
+            
+            if not recompute_success:
+                continue
+                
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/ranked/{symbol}')
+            
+            if not success:
+                continue
+
+            hypotheses = data.get('hypotheses', [])
+            ranking_metadata = data.get('ranking_metadata', {})
+            duplicates_removed = ranking_metadata.get('duplicates_removed', 0)
+            
+            # Check for unique hypothesis types
+            hypothesis_types = [h.get('hypothesis_type', '') for h in hypotheses]
+            unique_types = set(hypothesis_types)
+            
+            if len(hypothesis_types) != len(unique_types):
+                self.log_test("22. Duplicate suppression logic", False, 
+                             f"{symbol}: Found duplicate hypothesis types in final pool")
+                return False
+                
+            # If duplicates were removed, we should have fewer hypotheses than original
+            # This is indicated by duplicates_removed > 0
+            if duplicates_removed > 0:
+                # Good - duplicates were identified and removed
+                pass
+
+        self.log_test("22. Duplicate suppression logic", True)
+        return True
+
     def run_all_tests(self):
         """Run all tests and print summary."""
         print("\n" + "=" * 80)
-        print("PHASE 30.1 — Hypothesis Pool Engine API Tests")
+        print("PHASE 30.1 & 30.2 — Hypothesis Pool & Ranking Engine API Tests")
         print("=" * 80)
         print(f"Backend URL: {self.base_url}")
         print("-" * 80)
         
-        # Run all tests
-        test_methods = [
+        # PHASE 30.1 - Pool Engine Tests
+        print("\n🔵 PHASE 30.1 - Hypothesis Pool Engine Tests")
+        print("-" * 50)
+        pool_tests = [
             self.test_hypothesis_pool_btc_endpoint,
             self.test_pool_size_limit,
             self.test_ranking_score_sorting,
@@ -612,22 +1020,59 @@ class HypothesisPoolAPITester:
             self.test_no_edge_fallback,
         ]
         
-        for test_method in test_methods:
+        pool_tests_passed = 0
+        for test_method in pool_tests:
             try:
-                test_method()
+                if test_method():
+                    pool_tests_passed += 1
+            except Exception as e:
+                self.log_test(test_method.__name__, False, f"Exception: {str(e)}")
+        
+        # PHASE 30.2 - Ranking Engine Tests
+        print(f"\n🟢 PHASE 30.2 - Hypothesis Ranking Engine Tests")
+        print("-" * 50)
+        ranking_tests = [
+            self.test_ranked_pool_btc_endpoint,
+            self.test_ranked_pool_sorting,
+            self.test_directional_balance,
+            self.test_ranking_metadata_structure,
+            self.test_max_pool_size_ranked,
+            self.test_ranked_pool_history_endpoint,
+            self.test_ranked_pool_recompute_endpoint,
+            self.test_dominance_penalty_logic,
+            self.test_diversity_penalty_logic,
+            self.test_duplicate_suppression_logic,
+        ]
+        
+        ranking_tests_passed = 0
+        for test_method in ranking_tests:
+            try:
+                if test_method():
+                    ranking_tests_passed += 1
             except Exception as e:
                 self.log_test(test_method.__name__, False, f"Exception: {str(e)}")
         
         # Print summary
-        print("-" * 80)
-        print(f"Tests completed: {self.tests_passed}/{self.tests_run} passed")
+        print("\n" + "=" * 80)
+        print("TEST SUMMARY")
+        print("=" * 80)
+        print(f"PHASE 30.1 Pool Engine: {pool_tests_passed}/{len(pool_tests)} passed")
+        print(f"PHASE 30.2 Ranking Engine: {ranking_tests_passed}/{len(ranking_tests)} passed")
+        print(f"Total: {self.tests_passed}/{self.tests_run} passed")
         
         if self.tests_passed == self.tests_run:
-            print("🎉 All Hypothesis Pool Engine API tests passed!")
+            print("🎉 All Hypothesis Pool & Ranking Engine API tests passed!")
             return True
         else:
             failed_count = self.tests_run - self.tests_passed
-            print(f"⚠️  {failed_count} Hypothesis Pool Engine API tests failed")
+            print(f"⚠️  {failed_count} tests failed")
+            
+            # Print failed tests
+            print("\n❌ Failed tests:")
+            for test_name, status in self.results:
+                if "FAIL" in status:
+                    print(f"   - {test_name}: {status}")
+            
             return False
 
 

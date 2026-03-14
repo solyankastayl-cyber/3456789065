@@ -632,6 +632,17 @@ try:
 except ImportError as e:
     print(f"[Routes] Hypothesis Pool router not available: {e}")
 
+# ============================================
+# PHASE 30.2 — Hypothesis Ranking Routes
+# ============================================
+
+try:
+    from modules.hypothesis_competition import hypothesis_ranking_router
+    app.include_router(hypothesis_ranking_router)
+    print("[Routes] PHASE 30.2 Hypothesis Ranking router registered")
+except ImportError as e:
+    print(f"[Routes] Hypothesis Ranking router not available: {e}")
+
 
 
 # ============================================
