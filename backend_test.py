@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-PHASE 29.5 - Strategy Brain API Tests
+PHASE 30.1 - Hypothesis Pool Engine API Tests
 
-Comprehensive testing of Strategy Brain API endpoints:
-- GET /api/v1/strategy/decision/{symbol}
-- GET /api/v1/strategy/summary/{symbol}
-- GET /api/v1/strategy/history/{symbol}
-- POST /api/v1/strategy/recompute/{symbol}
-- GET /api/v1/strategy/available
+Comprehensive testing of Hypothesis Pool Engine API endpoints:
+- GET /api/v1/hypothesis/pool/{symbol} - returns pool of competing hypotheses
+- GET /api/v1/hypothesis/pool/summary/{symbol} - returns pool statistics
+- GET /api/v1/hypothesis/pool/history/{symbol} - returns pool history
+- POST /api/v1/hypothesis/pool/recompute/{symbol} - recomputes pool
 
 Tests verify:
-1. Hypothesis-to-Strategy mapping (BULLISH_CONTINUATION → trend_following, breakout_trading)
-2. Suitability score calculation: 0.45*confidence + 0.25*reliability + 0.20*regime_support + 0.10*microstructure_quality
-3. Execution filter: UNFAVORABLE → strategy blocked
-4. Integration with Hypothesis Engine
+1. Pool has maximum 5 hypotheses
+2. Hypotheses sorted by ranking_score descending
+3. top_hypothesis is first in pool
+4. pool_confidence is mean of top 3 confidences
+5. pool_reliability is mean of all reliabilities
+6. Filtering: confidence > 0.30, reliability > 0.25, execution != UNFAVORABLE
+7. ranking_score = 0.50*confidence + 0.30*reliability + 0.20*execution_score
 """
 
 import requests
@@ -26,7 +28,7 @@ from typing import Dict, Any, List
 # Get backend URL from environment
 BACKEND_URL = "https://ta-analysis-sandbox.preview.emergentagent.com"
 
-class StrategyBrainAPITester:
+class HypothesisPoolAPITester:
     def __init__(self, base_url=BACKEND_URL):
         self.base_url = base_url
         self.session = requests.Session()
@@ -38,18 +40,14 @@ class StrategyBrainAPITester:
         self.tests_passed = 0
         self.results = []
         
-        # Expected hypothesis-to-strategy mappings
-        self.expected_mappings = {
-            "BULLISH_CONTINUATION": ["trend_following", "breakout_trading"],
-            "BEARISH_CONTINUATION": ["trend_following", "volatility_expansion"], 
-            "BREAKOUT_FORMING": ["breakout_trading", "volatility_expansion"],
-            "RANGE_MEAN_REVERSION": ["mean_reversion", "range_trading"],
-            "SHORT_SQUEEZE_SETUP": ["liquidation_capture", "volatility_expansion"],
-            "LONG_SQUEEZE_SETUP": ["liquidation_capture", "volatility_expansion"],
-            "VOLATILE_UNWIND": ["volatility_expansion", "mean_reversion"],
-            "BREAKOUT_FAILURE_RISK": ["mean_reversion", "range_trading"],
-            "NO_EDGE": [],
-        }
+        # Pool validation constants
+        self.MAX_POOL_SIZE = 5
+        self.CONFIDENCE_THRESHOLD = 0.30
+        self.RELIABILITY_THRESHOLD = 0.25
+        self.RANKING_WEIGHT_CONFIDENCE = 0.50
+        self.RANKING_WEIGHT_RELIABILITY = 0.30
+        self.RANKING_WEIGHT_EXECUTION = 0.20
+        self.POOL_CONFIDENCE_TOP_N = 3
 
     def log_test(self, name: str, passed: bool, details: str = ""):
         """Log test result."""
@@ -91,26 +89,25 @@ class StrategyBrainAPITester:
         except requests.exceptions.RequestException as e:
             return False, {}, f"Request failed: {str(e)}"
 
-    def test_strategy_decision_btc_endpoint(self):
-        """Test 1: GET /api/v1/strategy/decision/BTC - returns strategy decision based on hypothesis."""
-        success, data, error = self.test_api_call('GET', 'api/v1/strategy/decision/BTC')
+    def test_hypothesis_pool_btc_endpoint(self):
+        """Test 1: GET /api/v1/hypothesis/pool/BTC - returns pool of competing hypotheses."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/BTC')
         
         if not success:
-            self.log_test("1. Strategy Decision BTC endpoint", False, error)
+            self.log_test("1. Hypothesis Pool BTC endpoint", False, error)
             return False
 
-        # Check required fields according to StrategyDecision
+        # Check required fields according to HypothesisPool
         required_fields = [
-            'symbol', 'hypothesis_type', 'directional_bias',
-            'selected_strategy', 'alternative_strategies',
-            'suitability_score', 'execution_state',
-            'confidence', 'reliability', 'reason', 'created_at'
+            'symbol', 'hypotheses', 'top_hypothesis',
+            'pool_confidence', 'pool_reliability', 
+            'pool_size', 'created_at'
         ]
         
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
-            self.log_test("1. Strategy Decision BTC endpoint", False, f"Missing fields: {missing_fields}")
+            self.log_test("1. Hypothesis Pool BTC endpoint", False, f"Missing fields: {missing_fields}")
             return False
 
         # Validate field types and ranges
@@ -120,50 +117,62 @@ class StrategyBrainAPITester:
         if data.get('symbol') != 'BTC':
             validation_errors.append(f"Expected symbol 'BTC', got '{data.get('symbol')}'")
             
-        # Suitability score validation (0-1 range)
-        suitability_score = data.get('suitability_score', -1)
-        if not isinstance(suitability_score, (int, float)) or not (0 <= suitability_score <= 1):
-            validation_errors.append(f"suitability_score should be between 0 and 1, got: {suitability_score}")
+        # Pool size validation (0-5)
+        pool_size = data.get('pool_size', -1)
+        if not isinstance(pool_size, int) or not (0 <= pool_size <= self.MAX_POOL_SIZE):
+            validation_errors.append(f"pool_size should be 0-{self.MAX_POOL_SIZE}, got: {pool_size}")
             
-        # Confidence validation (0-1 range)
-        confidence = data.get('confidence', -1)
-        if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 1):
-            validation_errors.append(f"confidence should be between 0 and 1, got: {confidence}")
+        # Pool confidence validation (0-1 range)
+        pool_confidence = data.get('pool_confidence', -1)
+        if not isinstance(pool_confidence, (int, float)) or not (0 <= pool_confidence <= 1):
+            validation_errors.append(f"pool_confidence should be between 0 and 1, got: {pool_confidence}")
             
-        # Reliability validation (0-1 range)
-        reliability = data.get('reliability', -1)
-        if not isinstance(reliability, (int, float)) or not (0 <= reliability <= 1):
-            validation_errors.append(f"reliability should be between 0 and 1, got: {reliability}")
+        # Pool reliability validation (0-1 range)
+        pool_reliability = data.get('pool_reliability', -1)
+        if not isinstance(pool_reliability, (int, float)) or not (0 <= pool_reliability <= 1):
+            validation_errors.append(f"pool_reliability should be between 0 and 1, got: {pool_reliability}")
 
-        # Hypothesis type validation
-        valid_hypothesis_types = list(self.expected_mappings.keys())
-        if data.get('hypothesis_type') not in valid_hypothesis_types:
-            validation_errors.append(f"Invalid hypothesis_type: {data.get('hypothesis_type')}")
-            
-        # Directional bias validation
-        if data.get('directional_bias') not in ['LONG', 'SHORT', 'NEUTRAL']:
-            validation_errors.append(f"Invalid directional_bias: {data.get('directional_bias')}")
-            
-        # Execution state validation
-        if data.get('execution_state') not in ['FAVORABLE', 'CAUTIOUS', 'UNFAVORABLE']:
-            validation_errors.append(f"Invalid execution_state: {data.get('execution_state')}")
+        # Hypotheses should be an array
+        hypotheses = data.get('hypotheses', [])
+        if not isinstance(hypotheses, list):
+            validation_errors.append("hypotheses should be an array")
+        else:
+            # Pool size should match hypotheses length
+            if len(hypotheses) != pool_size:
+                validation_errors.append(f"pool_size ({pool_size}) doesn't match hypotheses length ({len(hypotheses)})")
+                
+            # Pool should not exceed max size
+            if len(hypotheses) > self.MAX_POOL_SIZE:
+                validation_errors.append(f"Pool exceeds max size {self.MAX_POOL_SIZE}, got {len(hypotheses)}")
 
-        # Selected strategy validation
-        selected_strategy = data.get('selected_strategy', '')
-        valid_strategies = [
-            "trend_following", "breakout_trading", "mean_reversion", "volatility_expansion",
-            "liquidation_capture", "range_trading", "basis_trade", "funding_arb", "none"
-        ]
-        if selected_strategy not in valid_strategies:
-            validation_errors.append(f"Invalid selected_strategy: {selected_strategy}")
+        # Top hypothesis should match first hypothesis if pool is not empty
+        if hypotheses:
+            first_hypothesis = hypotheses[0].get('hypothesis_type', '')
+            top_hypothesis = data.get('top_hypothesis', '')
+            if first_hypothesis != top_hypothesis:
+                validation_errors.append(f"top_hypothesis ({top_hypothesis}) doesn't match first hypothesis ({first_hypothesis})")
+        else:
+            # Empty pool should have NO_EDGE as top hypothesis
+            if data.get('top_hypothesis') != 'NO_EDGE':
+                validation_errors.append(f"Empty pool should have NO_EDGE as top_hypothesis, got: {data.get('top_hypothesis')}")
 
-        # Alternative strategies should be a list
-        if not isinstance(data.get('alternative_strategies'), list):
-            validation_errors.append("alternative_strategies should be a list")
-
-        # Reason should be non-empty string
-        if not isinstance(data.get('reason'), str) or not data.get('reason').strip():
-            validation_errors.append("reason should be non-empty string")
+        # Validate individual hypothesis items if present
+        for i, hypothesis in enumerate(hypotheses):
+            required_h_fields = [
+                'hypothesis_type', 'directional_bias', 'confidence', 
+                'reliability', 'structural_score', 'execution_score',
+                'conflict_score', 'ranking_score', 'execution_state', 'reason'
+            ]
+            missing_h_fields = [field for field in required_h_fields if field not in hypothesis]
+            if missing_h_fields:
+                validation_errors.append(f"Hypothesis {i} missing fields: {missing_h_fields}")
+                continue
+                
+            # Score range validation
+            for score_field in ['confidence', 'reliability', 'structural_score', 'execution_score', 'conflict_score', 'ranking_score']:
+                value = hypothesis.get(score_field, -1)
+                if not isinstance(value, (int, float)) or not (0 <= value <= 1):
+                    validation_errors.append(f"Hypothesis {i} {score_field} should be 0-1, got: {value}")
 
         # created_at should be valid ISO datetime
         try:
@@ -172,413 +181,435 @@ class StrategyBrainAPITester:
             validation_errors.append("created_at should be valid ISO datetime")
 
         if validation_errors:
-            self.log_test("1. Strategy Decision BTC endpoint", False, "; ".join(validation_errors))
+            self.log_test("1. Hypothesis Pool BTC endpoint", False, "; ".join(validation_errors))
             return False
             
-        self.log_test("1. Strategy Decision BTC endpoint", True)
+        self.log_test("1. Hypothesis Pool BTC endpoint", True)
         return True
 
-    def test_hypothesis_strategy_mapping(self):
-        """Test 2: Verify hypothesis to strategy mapping works correctly."""
+    def test_pool_size_limit(self):
+        """Test 2: Verify pool has max 5 hypotheses."""
         symbols = ['BTC', 'ETH', 'SOL']
         
         for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/pool/{symbol}')
             
             if not success:
-                self.log_test("2. Hypothesis-Strategy mapping", False, f"Failed to get {symbol} data: {error}")
+                self.log_test("2. Pool size limit", False, f"Failed to get {symbol} data: {error}")
                 return False
 
-            hypothesis_type = data.get('hypothesis_type')
-            selected_strategy = data.get('selected_strategy')
-            alternative_strategies = data.get('alternative_strategies', [])
+            hypotheses = data.get('hypotheses', [])
+            pool_size = data.get('pool_size', 0)
             
-            # Check if the selected strategy is valid for the hypothesis
-            expected_strategies = self.expected_mappings.get(hypothesis_type, [])
+            if len(hypotheses) > self.MAX_POOL_SIZE:
+                self.log_test("2. Pool size limit", False, 
+                             f"{symbol}: Pool exceeds max size {self.MAX_POOL_SIZE}, got {len(hypotheses)}")
+                return False
+                
+            if pool_size != len(hypotheses):
+                self.log_test("2. Pool size limit", False, 
+                             f"{symbol}: pool_size ({pool_size}) doesn't match hypotheses length ({len(hypotheses)})")
+                return False
+
+        self.log_test("2. Pool size limit", True)
+        return True
+
+    def test_ranking_score_sorting(self):
+        """Test 3: Hypotheses sorted by ranking_score descending."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/ETH')
+        
+        if not success:
+            self.log_test("3. Ranking score sorting", False, f"Failed to get ETH data: {error}")
+            return False
+
+        hypotheses = data.get('hypotheses', [])
+        
+        if len(hypotheses) < 2:
+            self.log_test("3. Ranking score sorting", True, "Pool has less than 2 hypotheses, cannot verify sorting")
+            return True
+
+        # Check if sorted in descending order
+        for i in range(len(hypotheses) - 1):
+            current_score = hypotheses[i].get('ranking_score', 0)
+            next_score = hypotheses[i + 1].get('ranking_score', 0)
             
-            if hypothesis_type == 'NO_EDGE':
-                # NO_EDGE should map to "none"
-                if selected_strategy != "none":
-                    self.log_test("2. Hypothesis-Strategy mapping", False, 
-                                 f"{symbol}: NO_EDGE should select 'none', got '{selected_strategy}'")
-                    return False
-            else:
-                # Other hypothesis types should select from expected strategies
-                if expected_strategies and selected_strategy not in expected_strategies:
-                    self.log_test("2. Hypothesis-Strategy mapping", False, 
-                                 f"{symbol}: {hypothesis_type} should select from {expected_strategies}, got '{selected_strategy}'")
-                    return False
-                    
-                # Alternative strategies should also be from expected list
-                for alt_strategy in alternative_strategies:
-                    if alt_strategy not in expected_strategies:
-                        self.log_test("2. Hypothesis-Strategy mapping", False, 
-                                     f"{symbol}: Alternative strategy '{alt_strategy}' not valid for {hypothesis_type}")
+            if current_score < next_score:
+                self.log_test("3. Ranking score sorting", False, 
+                             f"Hypotheses not sorted by ranking_score descending: {current_score} < {next_score} at position {i}")
+                return False
+
+        self.log_test("3. Ranking score sorting", True)
+        return True
+
+    def test_ranking_score_calculation(self):
+        """Test 4: ranking_score = 0.50*confidence + 0.30*reliability + 0.20*execution_score."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/BTC')
+        
+        if not success:
+            self.log_test("4. Ranking score calculation", False, f"Failed to get BTC data: {error}")
+            return False
+
+        hypotheses = data.get('hypotheses', [])
+        
+        if not hypotheses:
+            self.log_test("4. Ranking score calculation", True, "No hypotheses to validate ranking score")
+            return True
+
+        # Verify ranking score calculation for each hypothesis
+        tolerance = 0.01  # Allow small floating-point differences
+        
+        for i, hypothesis in enumerate(hypotheses):
+            confidence = hypothesis.get('confidence', 0)
+            reliability = hypothesis.get('reliability', 0)
+            execution_score = hypothesis.get('execution_score', 0)
+            ranking_score = hypothesis.get('ranking_score', 0)
+            
+            expected_score = (
+                self.RANKING_WEIGHT_CONFIDENCE * confidence +
+                self.RANKING_WEIGHT_RELIABILITY * reliability +
+                self.RANKING_WEIGHT_EXECUTION * execution_score
+            )
+            expected_score = round(min(max(expected_score, 0.0), 1.0), 4)
+            
+            if abs(ranking_score - expected_score) > tolerance:
+                self.log_test("4. Ranking score calculation", False, 
+                             f"Hypothesis {i}: ranking_score {ranking_score} != expected {expected_score}")
+                return False
+
+        self.log_test("4. Ranking score calculation", True)
+        return True
+
+    def test_pool_confidence_calculation(self):
+        """Test 5: pool_confidence is mean of top 3 hypotheses confidences."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/ETH')
+        
+        if not success:
+            self.log_test("5. Pool confidence calculation", False, f"Failed to get ETH data: {error}")
+            return False
+
+        hypotheses = data.get('hypotheses', [])
+        pool_confidence = data.get('pool_confidence', 0)
+        
+        if not hypotheses:
+            # Empty pool should have 0 confidence
+            if pool_confidence != 0:
+                self.log_test("5. Pool confidence calculation", False, 
+                             f"Empty pool should have 0 confidence, got {pool_confidence}")
+                return False
+            self.log_test("5. Pool confidence calculation", True)
+            return True
+
+        # Calculate expected pool confidence (mean of top N)
+        top_n = min(len(hypotheses), self.POOL_CONFIDENCE_TOP_N)
+        top_confidences = [h.get('confidence', 0) for h in hypotheses[:top_n]]
+        expected_confidence = round(sum(top_confidences) / len(top_confidences), 4)
+        
+        tolerance = 0.01
+        if abs(pool_confidence - expected_confidence) > tolerance:
+            self.log_test("5. Pool confidence calculation", False, 
+                         f"pool_confidence {pool_confidence} != expected {expected_confidence}")
+            return False
+
+        self.log_test("5. Pool confidence calculation", True)
+        return True
+
+    def test_pool_reliability_calculation(self):
+        """Test 6: pool_reliability is mean of all hypotheses reliabilities."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/SOL')
+        
+        if not success:
+            self.log_test("6. Pool reliability calculation", False, f"Failed to get SOL data: {error}")
+            return False
+
+        hypotheses = data.get('hypotheses', [])
+        pool_reliability = data.get('pool_reliability', 0)
+        
+        if not hypotheses:
+            # Empty pool should have 0 reliability
+            if pool_reliability != 0:
+                self.log_test("6. Pool reliability calculation", False, 
+                             f"Empty pool should have 0 reliability, got {pool_reliability}")
+                return False
+            self.log_test("6. Pool reliability calculation", True)
+            return True
+
+        # Calculate expected pool reliability (mean of all)
+        all_reliabilities = [h.get('reliability', 0) for h in hypotheses]
+        expected_reliability = round(sum(all_reliabilities) / len(all_reliabilities), 4)
+        
+        tolerance = 0.01
+        if abs(pool_reliability - expected_reliability) > tolerance:
+            self.log_test("6. Pool reliability calculation", False, 
+                         f"pool_reliability {pool_reliability} != expected {expected_reliability}")
+            return False
+
+        self.log_test("6. Pool reliability calculation", True)
+        return True
+
+    def test_filtering_thresholds(self):
+        """Test 7: Filtering by confidence > 0.30, reliability > 0.25, execution != UNFAVORABLE."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/pool/{symbol}')
+            
+            if not success:
+                self.log_test("7. Filtering thresholds", False, f"Failed to get {symbol} data: {error}")
+                return False
+
+            hypotheses = data.get('hypotheses', [])
+            
+            for i, hypothesis in enumerate(hypotheses):
+                confidence = hypothesis.get('confidence', 0)
+                reliability = hypothesis.get('reliability', 0)
+                execution_state = hypothesis.get('execution_state', 'UNFAVORABLE')
+                
+                # Check confidence threshold (unless it's NO_EDGE fallback)
+                if hypothesis.get('hypothesis_type') != 'NO_EDGE':
+                    if confidence <= self.CONFIDENCE_THRESHOLD:
+                        self.log_test("7. Filtering thresholds", False, 
+                                     f"{symbol} hypothesis {i}: confidence {confidence} <= threshold {self.CONFIDENCE_THRESHOLD}")
+                        return False
+                        
+                    # Check reliability threshold
+                    if reliability <= self.RELIABILITY_THRESHOLD:
+                        self.log_test("7. Filtering thresholds", False, 
+                                     f"{symbol} hypothesis {i}: reliability {reliability} <= threshold {self.RELIABILITY_THRESHOLD}")
+                        return False
+                        
+                    # Check execution state
+                    if execution_state == 'UNFAVORABLE':
+                        self.log_test("7. Filtering thresholds", False, 
+                                     f"{symbol} hypothesis {i}: execution_state is UNFAVORABLE")
                         return False
 
-        self.log_test("2. Hypothesis-Strategy mapping", True)
+        self.log_test("7. Filtering thresholds", True)
         return True
 
-    def test_suitability_score_calculation(self):
-        """Test 3: Suitability score = 0.45*confidence + 0.25*reliability + 0.20*regime_support + 0.10*microstructure_quality."""
-        success, data, error = self.test_api_call('GET', 'api/v1/strategy/decision/ETH')
+    def test_pool_summary_endpoint(self):
+        """Test 8: GET /api/v1/hypothesis/pool/summary/{symbol} - returns pool statistics."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/summary/BTC')
         
         if not success:
-            self.log_test("3. Suitability score calculation", False, f"Failed to get ETH data: {error}")
+            self.log_test("8. Pool Summary endpoint", False, error)
             return False
 
-        confidence = data.get('confidence', 0)
-        reliability = data.get('reliability', 0) 
-        suitability_score = data.get('suitability_score', 0)
-        
-        # Note: We can't directly test regime_support and microstructure_quality 
-        # from the API response as they're internal calculations.
-        # We'll verify the score is reasonable given confidence and reliability
-        
-        # Basic validation: if confidence and reliability are both high, suitability should be decent
-        if confidence >= 0.7 and reliability >= 0.7:
-            if suitability_score < 0.4:  # Should be at least 0.4 with high conf+rel
-                self.log_test("3. Suitability score calculation", False, 
-                             f"High confidence ({confidence}) and reliability ({reliability}) should yield higher suitability score than {suitability_score}")
-                return False
-
-        # Suitability should not exceed 1.0 or be negative
-        if not (0 <= suitability_score <= 1.0):
-            self.log_test("3. Suitability score calculation", False, 
-                         f"Suitability score should be [0,1], got {suitability_score}")
-            return False
-
-        self.log_test("3. Suitability score calculation", True)
-        return True
-
-    def test_unfavorable_execution_blocks_strategy(self):
-        """Test 4: UNFAVORABLE execution_state blocks strategy selection."""
-        symbols = ['BTC', 'ETH', 'SOL']
-        
-        for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
-            
-            if not success:
-                self.log_test("4. UNFAVORABLE execution blocks strategy", False, f"Failed to get {symbol} data: {error}")
-                return False
-
-            execution_state = data.get('execution_state')
-            selected_strategy = data.get('selected_strategy')
-            reason = data.get('reason', '')
-            
-            if execution_state == 'UNFAVORABLE':
-                # Should select "none" when execution is unfavorable
-                if selected_strategy != "none":
-                    self.log_test("4. UNFAVORABLE execution blocks strategy", False, 
-                                 f"{symbol}: UNFAVORABLE execution should block strategy, got '{selected_strategy}'")
-                    return False
-                    
-                # Reason should mention execution conditions
-                if 'unfavorable' not in reason.lower():
-                    self.log_test("4. UNFAVORABLE execution blocks strategy", False, 
-                                 f"{symbol}: Reason should mention unfavorable execution: {reason}")
-                    return False
-                    
-                self.log_test("4. UNFAVORABLE execution blocks strategy", True)
-                return True
-
-        # If no UNFAVORABLE found, test with multiple symbols
-        self.log_test("4. UNFAVORABLE execution blocks strategy", True, "No UNFAVORABLE execution found in tested symbols")
-        return True
-
-    def test_strategy_summary_endpoint(self):
-        """Test 5: GET /api/v1/strategy/summary/{symbol} - returns strategy statistics."""
-        success, data, error = self.test_api_call('GET', 'api/v1/strategy/summary/BTC')
-        
-        if not success:
-            self.log_test("5. Strategy Summary endpoint", False, error)
-            return False
-
-        # Check summary structure according to StrategySummary
+        # Check summary structure according to HypothesisPoolSummary
         required_fields = [
-            'symbol', 'total_decisions', 'strategies', 'averages', 'current'
+            'symbol', 'total_pools', 'top_hypothesis_distribution', 
+            'averages', 'current'
         ]
         
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
-            self.log_test("5. Strategy Summary endpoint", False, f"Missing fields: {missing_fields}")
+            self.log_test("8. Pool Summary endpoint", False, f"Missing fields: {missing_fields}")
             return False
 
         # Check nested structures
         validation_errors = []
         
-        # Strategy counts
-        strategies = data.get('strategies', {})
-        expected_strategies = [
-            'trend_following', 'breakout_trading', 'mean_reversion', 'volatility_expansion',
-            'liquidation_capture', 'range_trading', 'basis_trade', 'funding_arb', 'none'
-        ]
-        missing_strategies = [s for s in expected_strategies if s not in strategies]
-        if missing_strategies:
-            validation_errors.append(f"Missing strategy counts: {missing_strategies}")
-            
         # Averages
         averages = data.get('averages', {})
-        expected_avg = ['suitability_score', 'confidence', 'reliability']
+        expected_avg = ['pool_size', 'pool_confidence', 'pool_reliability']
         missing_avgs = [avg for avg in expected_avg if avg not in averages]
         if missing_avgs:
             validation_errors.append(f"Missing average fields: {missing_avgs}")
 
         # Current state
         current = data.get('current', {})
-        expected_current = ['strategy', 'hypothesis']
+        expected_current = ['top_hypothesis', 'pool_size']
         missing_current = [curr for curr in expected_current if curr not in current]
         if missing_current:
             validation_errors.append(f"Missing current state fields: {missing_current}")
 
+        # Total pools should be non-negative integer
+        total_pools = data.get('total_pools', -1)
+        if not isinstance(total_pools, int) or total_pools < 0:
+            validation_errors.append(f"total_pools should be non-negative integer, got: {total_pools}")
+
         if validation_errors:
-            self.log_test("5. Strategy Summary endpoint", False, "; ".join(validation_errors))
+            self.log_test("8. Pool Summary endpoint", False, "; ".join(validation_errors))
             return False
             
-        self.log_test("5. Strategy Summary endpoint", True)
+        self.log_test("8. Pool Summary endpoint", True)
         return True
 
-    def test_strategy_history_endpoint(self):
-        """Test 6: GET /api/v1/strategy/history/{symbol} - returns decision history."""
-        success, data, error = self.test_api_call('GET', 'api/v1/strategy/history/BTC?limit=10')
+    def test_pool_history_endpoint(self):
+        """Test 9: GET /api/v1/hypothesis/pool/history/{symbol} - returns pool history."""
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/history/ETH?limit=10')
         
         if not success:
-            self.log_test("6. Strategy History endpoint", False, error)
+            self.log_test("9. Pool History endpoint", False, error)
             return False
 
         # Check history structure
-        required_fields = ['symbol', 'decisions', 'total']
+        required_fields = ['symbol', 'pools', 'total']
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
-            self.log_test("6. Strategy History endpoint", False, f"Missing fields: {missing_fields}")
+            self.log_test("9. Pool History endpoint", False, f"Missing fields: {missing_fields}")
             return False
 
         # Validate history array
-        decisions = data.get('decisions', [])
-        if not isinstance(decisions, list):
-            self.log_test("6. Strategy History endpoint", False, "Decisions should be an array")
+        pools = data.get('pools', [])
+        if not isinstance(pools, list):
+            self.log_test("9. Pool History endpoint", False, "pools should be an array")
             return False
             
         # Check total matches array length
-        if data.get('total') != len(decisions):
-            self.log_test("6. Strategy History endpoint", False, "Total doesn't match decisions array length")
+        if data.get('total') != len(pools):
+            self.log_test("9. Pool History endpoint", False, "total doesn't match pools array length")
             return False
 
         # If we have history records, validate first one
-        if decisions:
-            first_decision = decisions[0]
-            required_decision_fields = [
-                'hypothesis_type', 'directional_bias', 'selected_strategy', 
-                'suitability_score', 'execution_state', 'confidence', 'reliability',
-                'reason', 'created_at'
+        if pools:
+            first_pool = pools[0]
+            required_pool_fields = [
+                'top_hypothesis', 'pool_size', 'pool_confidence', 'pool_reliability',
+                'hypotheses', 'created_at'
             ]
             
-            missing_decision_fields = [field for field in required_decision_fields if field not in first_decision]
-            if missing_decision_fields:
-                self.log_test("6. Strategy History endpoint", False, f"History decision missing fields: {missing_decision_fields}")
+            missing_pool_fields = [field for field in required_pool_fields if field not in first_pool]
+            if missing_pool_fields:
+                self.log_test("9. Pool History endpoint", False, f"History pool missing fields: {missing_pool_fields}")
                 return False
 
-        self.log_test("6. Strategy History endpoint", True)
+        self.log_test("9. Pool History endpoint", True)
         return True
 
-    def test_strategy_recompute_endpoint(self):
-        """Test 7: POST /api/v1/strategy/recompute/{symbol} - recomputes strategy."""
-        success, data, error = self.test_api_call('POST', 'api/v1/strategy/recompute/ETH')
+    def test_pool_recompute_endpoint(self):
+        """Test 10: POST /api/v1/hypothesis/pool/recompute/{symbol} - recomputes pool."""
+        success, data, error = self.test_api_call('POST', 'api/v1/hypothesis/pool/recompute/SOL')
         
         if not success:
-            self.log_test("7. Strategy Recompute endpoint", False, error)
+            self.log_test("10. Pool Recompute endpoint", False, error)
             return False
 
         # Check recompute response structure
         required_fields = [
-            'status', 'symbol', 'hypothesis_type', 'directional_bias',
-            'selected_strategy', 'alternative_strategies', 'suitability_score',
-            'execution_state', 'confidence', 'reliability', 'reason', 'computed_at'
+            'status', 'symbol', 'hypotheses', 'top_hypothesis',
+            'pool_confidence', 'pool_reliability', 'pool_size', 'computed_at'
         ]
         
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
-            self.log_test("7. Strategy Recompute endpoint", False, f"Missing fields: {missing_fields}")
+            self.log_test("10. Pool Recompute endpoint", False, f"Missing fields: {missing_fields}")
             return False
 
         # Check status is ok
         if data.get('status') != 'ok':
-            self.log_test("7. Strategy Recompute endpoint", False, f"Expected status 'ok', got '{data.get('status')}'")
+            self.log_test("10. Pool Recompute endpoint", False, f"Expected status 'ok', got '{data.get('status')}'")
             return False
             
-        # Check symbol is ETH
-        if data.get('symbol') != 'ETH':
-            self.log_test("7. Strategy Recompute endpoint", False, f"Expected symbol 'ETH', got '{data.get('symbol')}'")
+        # Check symbol is SOL
+        if data.get('symbol') != 'SOL':
+            self.log_test("10. Pool Recompute endpoint", False, f"Expected symbol 'SOL', got '{data.get('symbol')}'")
             return False
 
-        # Validate score ranges
+        # Validate pool metrics
         validation_errors = []
-        for score_field in ['suitability_score', 'confidence', 'reliability']:
+        for score_field in ['pool_confidence', 'pool_reliability']:
             value = data.get(score_field, -1)
             if not isinstance(value, (int, float)) or not (0 <= value <= 1):
                 validation_errors.append(f"{score_field} should be between 0 and 1, got: {value}")
 
+        # Pool size validation
+        pool_size = data.get('pool_size', -1)
+        if not isinstance(pool_size, int) or not (0 <= pool_size <= self.MAX_POOL_SIZE):
+            validation_errors.append(f"pool_size should be 0-{self.MAX_POOL_SIZE}, got: {pool_size}")
+
+        # Hypotheses should be array
+        hypotheses = data.get('hypotheses', [])
+        if not isinstance(hypotheses, list):
+            validation_errors.append("hypotheses should be an array")
+        elif len(hypotheses) != pool_size:
+            validation_errors.append(f"hypotheses length ({len(hypotheses)}) doesn't match pool_size ({pool_size})")
+
         if validation_errors:
-            self.log_test("7. Strategy Recompute endpoint", False, "; ".join(validation_errors))
+            self.log_test("10. Pool Recompute endpoint", False, "; ".join(validation_errors))
             return False
 
-        self.log_test("7. Strategy Recompute endpoint", True)
+        self.log_test("10. Pool Recompute endpoint", True)
         return True
 
-    def test_strategy_available_endpoint(self):
-        """Test 8: GET /api/v1/strategy/available - returns available strategies and mapping."""
-        success, data, error = self.test_api_call('GET', 'api/v1/strategy/available')
+    def test_top_hypothesis_is_first(self):
+        """Test 11: top_hypothesis matches first hypothesis in pool."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/pool/{symbol}')
+            
+            if not success:
+                self.log_test("11. top_hypothesis is first", False, f"Failed to get {symbol} data: {error}")
+                return False
+
+            hypotheses = data.get('hypotheses', [])
+            top_hypothesis = data.get('top_hypothesis', '')
+            
+            if hypotheses:
+                first_hypothesis = hypotheses[0].get('hypothesis_type', '')
+                if first_hypothesis != top_hypothesis:
+                    self.log_test("11. top_hypothesis is first", False, 
+                                 f"{symbol}: top_hypothesis ({top_hypothesis}) != first hypothesis ({first_hypothesis})")
+                    return False
+            else:
+                # Empty pool should have NO_EDGE as top hypothesis
+                if top_hypothesis != 'NO_EDGE':
+                    self.log_test("11. top_hypothesis is first", False, 
+                                 f"{symbol}: Empty pool should have NO_EDGE, got {top_hypothesis}")
+                    return False
+
+        self.log_test("11. top_hypothesis is first", True)
+        return True
+
+    def test_no_edge_fallback(self):
+        """Test 12: NO_EDGE fallback when no valid hypotheses meet criteria."""
+        # Try with a symbol that might not have valid hypotheses
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/pool/INVALID')
         
         if not success:
-            self.log_test("8. Strategy Available endpoint", False, error)
-            return False
+            # If the API call fails, that's expected for invalid symbols
+            self.log_test("12. NO_EDGE fallback", True, "Invalid symbol appropriately rejected")
+            return True
 
-        # Check structure
-        required_fields = ['strategies', 'hypothesis_mapping']
-        missing_fields = [field for field in required_fields if field not in data]
+        # If it succeeds, check if NO_EDGE is used appropriately
+        top_hypothesis = data.get('top_hypothesis', '')
+        hypotheses = data.get('hypotheses', [])
         
-        if missing_fields:
-            self.log_test("8. Strategy Available endpoint", False, f"Missing fields: {missing_fields}")
-            return False
-
-        # Validate strategies list
-        strategies = data.get('strategies', [])
-        expected_strategies = [
-            "trend_following", "breakout_trading", "mean_reversion", "volatility_expansion",
-            "liquidation_capture", "range_trading", "basis_trade", "funding_arb"
-        ]
+        if not hypotheses:
+            # Empty pool should use NO_EDGE
+            if top_hypothesis != 'NO_EDGE':
+                self.log_test("12. NO_EDGE fallback", False, 
+                             f"Empty pool should use NO_EDGE, got {top_hypothesis}")
+                return False
         
-        missing_strategies = [s for s in expected_strategies if s not in strategies]
-        if missing_strategies:
-            self.log_test("8. Strategy Available endpoint", False, f"Missing strategies: {missing_strategies}")
-            return False
-
-        # Validate hypothesis mapping
-        hypothesis_mapping = data.get('hypothesis_mapping', {})
-        for hypothesis, expected_strats in self.expected_mappings.items():
-            if hypothesis in hypothesis_mapping:
-                actual_strats = hypothesis_mapping[hypothesis]
-                if actual_strats != expected_strats:
-                    self.log_test("8. Strategy Available endpoint", False, 
-                                 f"Mapping mismatch for {hypothesis}: expected {expected_strats}, got {actual_strats}")
-                    return False
-
-        self.log_test("8. Strategy Available endpoint", True)
-        return True
-
-    def test_bullish_continuation_strategy_mapping(self):
-        """Test 9: BULLISH_CONTINUATION → trend_following, breakout_trading."""
-        symbols = ['BTC', 'ETH', 'SOL']
-        
-        for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
-            
-            if success and data.get('hypothesis_type') == 'BULLISH_CONTINUATION':
-                selected_strategy = data.get('selected_strategy')
-                expected = ["trend_following", "breakout_trading"]
-                
-                if selected_strategy not in expected:
-                    self.log_test("9. BULLISH_CONTINUATION mapping", False, 
-                                 f"BULLISH_CONTINUATION should select from {expected}, got '{selected_strategy}'")
-                    return False
-                    
-                self.log_test("9. BULLISH_CONTINUATION mapping", True)
-                return True
-        
-        # If no BULLISH_CONTINUATION found
-        self.log_test("9. BULLISH_CONTINUATION mapping", True, "No BULLISH_CONTINUATION found in tested symbols")
-        return True
-
-    def test_breakout_forming_strategy_mapping(self):
-        """Test 10: BREAKOUT_FORMING → breakout_trading, volatility_expansion."""
-        symbols = ['BTC', 'ETH', 'SOL']
-        
-        for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
-            
-            if success and data.get('hypothesis_type') == 'BREAKOUT_FORMING':
-                selected_strategy = data.get('selected_strategy')
-                expected = ["breakout_trading", "volatility_expansion"]
-                
-                if selected_strategy not in expected:
-                    self.log_test("10. BREAKOUT_FORMING mapping", False, 
-                                 f"BREAKOUT_FORMING should select from {expected}, got '{selected_strategy}'")
-                    return False
-                    
-                self.log_test("10. BREAKOUT_FORMING mapping", True)
-                return True
-        
-        self.log_test("10. BREAKOUT_FORMING mapping", True, "No BREAKOUT_FORMING found in tested symbols")
-        return True
-
-    def test_range_mean_reversion_strategy_mapping(self):
-        """Test 11: RANGE_MEAN_REVERSION → mean_reversion, range_trading."""
-        symbols = ['BTC', 'ETH', 'SOL']
-        
-        for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
-            
-            if success and data.get('hypothesis_type') == 'RANGE_MEAN_REVERSION':
-                selected_strategy = data.get('selected_strategy')
-                expected = ["mean_reversion", "range_trading"]
-                
-                if selected_strategy not in expected:
-                    self.log_test("11. RANGE_MEAN_REVERSION mapping", False, 
-                                 f"RANGE_MEAN_REVERSION should select from {expected}, got '{selected_strategy}'")
-                    return False
-                    
-                self.log_test("11. RANGE_MEAN_REVERSION mapping", True)
-                return True
-        
-        self.log_test("11. RANGE_MEAN_REVERSION mapping", True, "No RANGE_MEAN_REVERSION found in tested symbols")
-        return True
-
-    def test_no_edge_strategy_mapping(self):
-        """Test 12: NO_EDGE → none (no strategy)."""
-        symbols = ['BTC', 'ETH', 'SOL', 'UNKNOWN']
-        
-        for symbol in symbols:
-            success, data, error = self.test_api_call('GET', f'api/v1/strategy/decision/{symbol}')
-            
-            if success and data.get('hypothesis_type') == 'NO_EDGE':
-                selected_strategy = data.get('selected_strategy')
-                
-                if selected_strategy != "none":
-                    self.log_test("12. NO_EDGE mapping", False, 
-                                 f"NO_EDGE should select 'none', got '{selected_strategy}'")
-                    return False
-                    
-                self.log_test("12. NO_EDGE mapping", True)
-                return True
-        
-        self.log_test("12. NO_EDGE mapping", True, "No NO_EDGE found in tested symbols")
+        self.log_test("12. NO_EDGE fallback", True)
         return True
 
     def run_all_tests(self):
         """Run all tests and print summary."""
         print("\n" + "=" * 80)
-        print("PHASE 29.5 — Strategy Brain API Tests")
+        print("PHASE 30.1 — Hypothesis Pool Engine API Tests")
         print("=" * 80)
         print(f"Backend URL: {self.base_url}")
         print("-" * 80)
         
         # Run all tests
         test_methods = [
-            self.test_strategy_decision_btc_endpoint,
-            self.test_hypothesis_strategy_mapping,
-            self.test_suitability_score_calculation,
-            self.test_unfavorable_execution_blocks_strategy,
-            self.test_strategy_summary_endpoint,
-            self.test_strategy_history_endpoint,
-            self.test_strategy_recompute_endpoint,
-            self.test_strategy_available_endpoint,
-            self.test_bullish_continuation_strategy_mapping,
-            self.test_breakout_forming_strategy_mapping,
-            self.test_range_mean_reversion_strategy_mapping,
-            self.test_no_edge_strategy_mapping,
+            self.test_hypothesis_pool_btc_endpoint,
+            self.test_pool_size_limit,
+            self.test_ranking_score_sorting,
+            self.test_ranking_score_calculation,
+            self.test_pool_confidence_calculation,
+            self.test_pool_reliability_calculation,
+            self.test_filtering_thresholds,
+            self.test_pool_summary_endpoint,
+            self.test_pool_history_endpoint,
+            self.test_pool_recompute_endpoint,
+            self.test_top_hypothesis_is_first,
+            self.test_no_edge_fallback,
         ]
         
         for test_method in test_methods:
@@ -592,17 +623,17 @@ class StrategyBrainAPITester:
         print(f"Tests completed: {self.tests_passed}/{self.tests_run} passed")
         
         if self.tests_passed == self.tests_run:
-            print("🎉 All Strategy Brain API tests passed!")
+            print("🎉 All Hypothesis Pool Engine API tests passed!")
             return True
         else:
             failed_count = self.tests_run - self.tests_passed
-            print(f"⚠️  {failed_count} Strategy Brain API tests failed")
+            print(f"⚠️  {failed_count} Hypothesis Pool Engine API tests failed")
             return False
 
 
 def main():
     """Run the test suite."""
-    tester = StrategyBrainAPITester()
+    tester = HypothesisPoolAPITester()
     success = tester.run_all_tests()
     
     # Return appropriate exit code
