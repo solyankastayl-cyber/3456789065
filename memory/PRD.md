@@ -11,14 +11,15 @@ TA Engine Module Runtime for Quant Trading Platform with modular architecture.
 ## User Personas
 - **Quant Researchers**: Building and validating trading strategies
 - **Traders**: Using generated hypotheses for trading decisions
-- **Risk Managers**: Monitoring execution quality and conflicts
+- **Risk Managers**: Monitoring execution quality, conflicts, and hypothesis accuracy
 
 ## Core Requirements (Static)
 - Market hypothesis generation from intelligence layers
 - Scoring separation: idea strength vs execution quality
 - Conflict detection and resolution between layers
 - Self-protecting system against signal chaos
-- API endpoints for hypothesis management
+- Persistent hypothesis history for learning and validation
+- API endpoints for hypothesis management and analytics
 
 ---
 
@@ -51,32 +52,56 @@ TA Engine Module Runtime for Quant Trading Platform with modular architecture.
 - `MODERATE_CONFLICT` (0.10-0.25): confidence×0.90, reliability×0.90, FAVORABLE→CAUTIOUS
 - `HIGH_CONFLICT` (≥0.25): confidence×0.70, reliability×0.75, → UNFAVORABLE
 
-**BEHAVIOR:**
-- System becomes self-protecting
-- Avoids trading during signal chaos
-- Reason includes conflict explanation
-
 **TESTS:** 20 unit tests passing
+
+### Phase 29.4 — Hypothesis Registry / History (2026-03-14)
+**PURPOSE:** Transform Hypothesis Engine from signal generator into market learning system.
+
+**FEATURES:**
+- MongoDB persistent storage with all extended fields
+- Extended history records with all PHASE 29.2/29.3 scores
+- Price tracking (price_at_creation) for future outcome analysis
+- Comprehensive statistics and analytics
+
+**NEW API ENDPOINTS:**
+- `GET /api/v1/hypothesis/stats/{symbol}` — Full statistics
+- `GET /api/v1/hypothesis/recent` — Recent hypotheses across all symbols
+- `GET /api/v1/hypothesis/symbols` — List of tracked symbols
+
+**STATISTICS INCLUDE:**
+- Directional breakdown (bullish/bearish/neutral)
+- Type breakdown (continuation/breakout/mean_reversion)
+- Conflict state breakdown (low/moderate/high)
+- Execution state breakdown (favorable/cautious/unfavorable)
+- Score averages (confidence, reliability, structural, execution, conflict)
+- Recent bias trend
+
+**MongoDB Collections:**
+- `market_hypothesis_history` — Full hypothesis records
+- `market_hypothesis_outcomes` — Structure prepared for future accuracy tracking
+
+**TESTS:** 22 unit tests passing
 
 ---
 
 ## Prioritized Backlog
 
 ### P0 (Next)
-- **Phase 29.4**: Hypothesis Registry / History (persistent storage, accuracy analysis)
+- **Phase 29.5**: Hypothesis Integration with Strategy Brain
+- **Phase 29.6**: Hypothesis Engine Freeze (production-ready)
 
 ### P1
-- **Phase 29.5**: Hypothesis Integration with Strategy Brain
-- **Phase 29.6**: Hypothesis Freeze (production-ready)
+- Hypothesis Competition Model (multiple hypotheses competing for capital)
+- Hypothesis Outcome Engine (accuracy tracking and validation)
 
 ### P2
-- Hypothesis Competition Model (multiple hypotheses competing for capital)
 - Real-time hypothesis streaming via WebSocket
 - Future alpha validation based on historical accuracy
+- Hypothesis Analytics Dashboard
 
 ---
 
 ## Next Tasks
-1. Implement Hypothesis Registry with MongoDB persistence (Phase 29.4)
-2. Add historical accuracy tracking
-3. Integrate with Strategy Brain for trading decisions
+1. Integrate Hypothesis Engine with Strategy Brain (Phase 29.5)
+2. Freeze Hypothesis Engine for production (Phase 29.6)
+3. Consider Hypothesis Competition Model for portfolio allocation
