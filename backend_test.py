@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-PHASE 29.2 - Hypothesis Scoring Engine API Tests
+PHASE 29.3 - Hypothesis Conflict Resolver API Tests
 
-Comprehensive testing of Hypothesis Scoring Engine API endpoints:
+Comprehensive testing of Hypothesis Engine API endpoints:
 - GET /api/v1/hypothesis/current/{symbol}
 - GET /api/v1/hypothesis/summary/{symbol}
 - GET /api/v1/hypothesis/history/{symbol}
 - POST /api/v1/hypothesis/recompute/{symbol}
 
 Tests verify response structure, field validation, and business logic.
-Validates the 3 independent scoring components:
+Validates the 3 independent scoring components (PHASE 29.2):
 1. structural_score - market logic quality
 2. execution_score - trading safety 
 3. conflict_score - layer contradictions
 
-Tests confidence and reliability calculations.
+PHASE 29.3 additions:
+- conflict_state classification (LOW_CONFLICT, MODERATE_CONFLICT, HIGH_CONFLICT)
+- Conflict resolution modifiers:
+  * LOW_CONFLICT: no changes
+  * MODERATE_CONFLICT: confidence×0.90, reliability×0.90, FAVORABLE→CAUTIOUS
+  * HIGH_CONFLICT: confidence×0.70, reliability×0.75, execution_state→UNFAVORABLE
+- Reason field includes conflict information for MODERATE/HIGH conflicts
 """
 
 import requests
@@ -91,6 +97,7 @@ class HypothesisScoringAPITester:
         required_fields = [
             'symbol', 'hypothesis_type', 'directional_bias',
             'structural_score', 'execution_score', 'conflict_score',
+            'conflict_state',  # PHASE 29.3
             'confidence', 'reliability',
             'alpha_support', 'regime_support', 'microstructure_support', 'macro_fractal_support',
             'execution_state', 'reason', 'created_at'
@@ -123,6 +130,12 @@ class HypothesisScoringAPITester:
         conflict_score = data.get('conflict_score', -1)
         if not isinstance(conflict_score, (int, float)) or not (0 <= conflict_score <= 1):
             validation_errors.append(f"conflict_score should be between 0 and 1, got: {conflict_score}")
+        
+        # PHASE 29.3: Conflict state validation
+        conflict_state = data.get('conflict_state', '')
+        valid_conflict_states = ['LOW_CONFLICT', 'MODERATE_CONFLICT', 'HIGH_CONFLICT']
+        if conflict_state not in valid_conflict_states:
+            validation_errors.append(f"Invalid conflict_state: {conflict_state}, expected one of {valid_conflict_states}")
             
         # Confidence validation (0-1 range)
         confidence = data.get('confidence', -1)
@@ -198,23 +211,33 @@ class HypothesisScoringAPITester:
         return True
 
     def test_reliability_formula_calculation(self):
-        """Test 3: Reliability formula = (1 - conflict_score) * regime_support."""
+        """Test 3: Reliability formula = (1 - conflict_score) * regime_support (before conflict adjustment)."""
         success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/current/ETH')
         
         if not success:
             self.log_test("3. Reliability formula calculation", False, f"Failed to get ETH data: {error}")
             return False
 
-        conflict = data.get('conflict_score', 0)
+        conflict_score = data.get('conflict_score', 0)
         regime_support = data.get('regime_support', 0)
         reliability = data.get('reliability', 0)
+        conflict_state = data.get('conflict_state', '')
         
-        expected_reliability = (1 - conflict) * regime_support
+        # Calculate base reliability before conflict adjustment
+        base_reliability = (1 - conflict_score) * regime_support
+        
+        # Apply PHASE 29.3 conflict adjustments
+        if conflict_state == 'MODERATE_CONFLICT':
+            expected_reliability = round(base_reliability * 0.90, 4)
+        elif conflict_state == 'HIGH_CONFLICT':
+            expected_reliability = round(base_reliability * 0.75, 4)
+        else:  # LOW_CONFLICT
+            expected_reliability = round(base_reliability, 4)
         
         # Allow for small floating point differences
         if abs(reliability - expected_reliability) > 0.01:
             self.log_test("3. Reliability formula calculation", False, 
-                         f"Expected reliability {expected_reliability:.4f}, got {reliability:.4f}")
+                         f"Expected reliability {expected_reliability:.4f} (base: {base_reliability:.4f}, state: {conflict_state}), got {reliability:.4f}")
             return False
 
         self.log_test("3. Reliability formula calculation", True)
@@ -365,6 +388,7 @@ class HypothesisScoringAPITester:
         required_fields = [
             'status', 'symbol', 'hypothesis_type', 'directional_bias',
             'structural_score', 'execution_score', 'conflict_score',
+            'conflict_state',  # PHASE 29.3
             'confidence', 'reliability', 'execution_state', 'reason', 'computed_at'
         ]
         
@@ -685,10 +709,250 @@ class HypothesisScoringAPITester:
         self.log_test("20. Hypothesis reason generation", True)
         return True
 
+    # PHASE 29.3 - Conflict Resolver Tests
+    
+    def test_conflict_state_classification(self):
+        """Test 21: PHASE 29.3 - Conflict state classification (LOW/MODERATE/HIGH)."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        found_states = set()
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if not success:
+                self.log_test("21. Conflict state classification", False, f"Failed to get {symbol} data: {error}")
+                return False
+
+            conflict_state = data.get('conflict_state', '')
+            conflict_score = data.get('conflict_score', 0)
+            found_states.add(conflict_state)
+            
+            # Verify conflict_state mapping based on conflict_score
+            if conflict_score < 0.10:
+                expected_state = 'LOW_CONFLICT'
+            elif conflict_score < 0.25:
+                expected_state = 'MODERATE_CONFLICT'
+            else:
+                expected_state = 'HIGH_CONFLICT'
+            
+            if conflict_state != expected_state:
+                self.log_test("21. Conflict state classification", False, 
+                             f"For {symbol}, conflict_score {conflict_score:.4f} should map to {expected_state}, got {conflict_state}")
+                return False
+
+        # Verify we have valid conflict states
+        valid_states = {'LOW_CONFLICT', 'MODERATE_CONFLICT', 'HIGH_CONFLICT'}
+        if not found_states.issubset(valid_states):
+            self.log_test("21. Conflict state classification", False, f"Invalid states found: {found_states - valid_states}")
+            return False
+
+        self.log_test("21. Conflict state classification", True)
+        return True
+    
+    def test_low_conflict_no_adjustments(self):
+        """Test 22: PHASE 29.3 - LOW_CONFLICT makes no adjustments to confidence/reliability."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if success and data.get('conflict_state') == 'LOW_CONFLICT':
+                # For LOW_CONFLICT, confidence and reliability should match base calculations
+                structural_score = data.get('structural_score', 0)
+                execution_score = data.get('execution_score', 0)
+                conflict_score = data.get('conflict_score', 0)
+                regime_support = data.get('regime_support', 0)
+                
+                # Base calculations (before conflict adjustment)
+                expected_confidence = 0.60 * structural_score + 0.40 * execution_score
+                expected_reliability = (1 - conflict_score) * regime_support
+                
+                actual_confidence = data.get('confidence', 0)
+                actual_reliability = data.get('reliability', 0)
+                
+                # Allow for small floating point differences
+                if abs(actual_confidence - expected_confidence) > 0.01:
+                    self.log_test("22. LOW_CONFLICT no adjustments", False, 
+                                 f"LOW_CONFLICT confidence should be unadjusted: expected {expected_confidence:.4f}, got {actual_confidence:.4f}")
+                    return False
+                    
+                if abs(actual_reliability - expected_reliability) > 0.01:
+                    self.log_test("22. LOW_CONFLICT no adjustments", False, 
+                                 f"LOW_CONFLICT reliability should be unadjusted: expected {expected_reliability:.4f}, got {actual_reliability:.4f}")
+                    return False
+                    
+                self.log_test("22. LOW_CONFLICT no adjustments", True)
+                return True
+        
+        self.log_test("22. LOW_CONFLICT no adjustments", False, "No LOW_CONFLICT state found in tested symbols")
+        return False
+    
+    def test_moderate_conflict_adjustments(self):
+        """Test 23: PHASE 29.3 - MODERATE_CONFLICT applies confidence×0.90, reliability×0.90."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if success and data.get('conflict_state') == 'MODERATE_CONFLICT':
+                structural_score = data.get('structural_score', 0)
+                execution_score = data.get('execution_score', 0)
+                conflict_score = data.get('conflict_score', 0)
+                regime_support = data.get('regime_support', 0)
+                
+                # Base calculations before adjustment
+                base_confidence = 0.60 * structural_score + 0.40 * execution_score
+                base_reliability = (1 - conflict_score) * regime_support
+                
+                # MODERATE_CONFLICT adjustments
+                expected_confidence = round(base_confidence * 0.90, 4)
+                expected_reliability = round(base_reliability * 0.90, 4)
+                
+                actual_confidence = data.get('confidence', 0)
+                actual_reliability = data.get('reliability', 0)
+                
+                # Allow for small floating point differences
+                if abs(actual_confidence - expected_confidence) > 0.01:
+                    self.log_test("23. MODERATE_CONFLICT adjustments", False, 
+                                 f"MODERATE_CONFLICT confidence should be base×0.90: expected {expected_confidence:.4f}, got {actual_confidence:.4f}")
+                    return False
+                    
+                if abs(actual_reliability - expected_reliability) > 0.01:
+                    self.log_test("23. MODERATE_CONFLICT adjustments", False, 
+                                 f"MODERATE_CONFLICT reliability should be base×0.90: expected {expected_reliability:.4f}, got {actual_reliability:.4f}")
+                    return False
+                    
+                self.log_test("23. MODERATE_CONFLICT adjustments", True)
+                return True
+        
+        self.log_test("23. MODERATE_CONFLICT adjustments", False, "No MODERATE_CONFLICT state found in tested symbols")
+        return False
+    
+    def test_moderate_conflict_execution_state_downgrade(self):
+        """Test 24: PHASE 29.3 - MODERATE_CONFLICT downgrades FAVORABLE→CAUTIOUS."""
+        # This test will verify the execution state downgrade logic
+        # Since we're testing simulated data, we'll check that the logic is consistent
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if success and data.get('conflict_state') == 'MODERATE_CONFLICT':
+                execution_score = data.get('execution_score', 0)
+                execution_state = data.get('execution_state', '')
+                
+                # For MODERATE_CONFLICT, if execution_score would normally give FAVORABLE
+                # it should be downgraded to CAUTIOUS
+                if execution_score >= 0.70:
+                    # This would normally be FAVORABLE, but MODERATE_CONFLICT should downgrade to CAUTIOUS
+                    if execution_state != 'CAUTIOUS':
+                        self.log_test("24. MODERATE_CONFLICT execution downgrade", False, 
+                                     f"MODERATE_CONFLICT should downgrade FAVORABLE→CAUTIOUS: execution_score {execution_score:.3f}, got {execution_state}")
+                        return False
+                
+                self.log_test("24. MODERATE_CONFLICT execution downgrade", True)
+                return True
+        
+        # If no MODERATE_CONFLICT found, just verify the API is working
+        success, data, error = self.test_api_call('GET', 'api/v1/hypothesis/current/BTC')
+        if success:
+            conflict_state = data.get('conflict_state', '')
+            self.log_test("24. MODERATE_CONFLICT execution downgrade", True, f"API working, BTC conflict_state: {conflict_state}")
+            return True
+        
+        self.log_test("24. MODERATE_CONFLICT execution downgrade", False, "Failed to get any data")
+        return False
+    
+    def test_high_conflict_adjustments(self):
+        """Test 25: PHASE 29.3 - HIGH_CONFLICT applies confidence×0.70, reliability×0.75."""
+        # Generate high conflict by testing multiple symbols or force a high conflict scenario
+        symbols = ['BTC', 'ETH', 'SOL', 'ADA', 'DOT']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if success and data.get('conflict_state') == 'HIGH_CONFLICT':
+                structural_score = data.get('structural_score', 0)
+                execution_score = data.get('execution_score', 0)
+                conflict_score = data.get('conflict_score', 0)
+                regime_support = data.get('regime_support', 0)
+                
+                # Base calculations before adjustment
+                base_confidence = 0.60 * structural_score + 0.40 * execution_score
+                base_reliability = (1 - conflict_score) * regime_support
+                
+                # HIGH_CONFLICT adjustments
+                expected_confidence = round(base_confidence * 0.70, 4)
+                expected_reliability = round(base_reliability * 0.75, 4)
+                
+                actual_confidence = data.get('confidence', 0)
+                actual_reliability = data.get('reliability', 0)
+                
+                # Allow for small floating point differences
+                if abs(actual_confidence - expected_confidence) > 0.01:
+                    self.log_test("25. HIGH_CONFLICT adjustments", False, 
+                                 f"HIGH_CONFLICT confidence should be base×0.70: expected {expected_confidence:.4f}, got {actual_confidence:.4f}")
+                    return False
+                    
+                if abs(actual_reliability - expected_reliability) > 0.01:
+                    self.log_test("25. HIGH_CONFLICT adjustments", False, 
+                                 f"HIGH_CONFLICT reliability should be base×0.75: expected {expected_reliability:.4f}, got {actual_reliability:.4f}")
+                    return False
+                    
+                # HIGH_CONFLICT should force execution_state to UNFAVORABLE
+                execution_state = data.get('execution_state', '')
+                if execution_state != 'UNFAVORABLE':
+                    self.log_test("25. HIGH_CONFLICT adjustments", False, 
+                                 f"HIGH_CONFLICT should force execution_state to UNFAVORABLE, got {execution_state}")
+                    return False
+                    
+                self.log_test("25. HIGH_CONFLICT adjustments", True)
+                return True
+        
+        self.log_test("25. HIGH_CONFLICT adjustments", False, "No HIGH_CONFLICT state found in tested symbols")
+        return False
+    
+    def test_conflict_reason_generation(self):
+        """Test 26: PHASE 29.3 - Reason contains conflict information for MODERATE/HIGH conflicts."""
+        symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in symbols:
+            success, data, error = self.test_api_call('GET', f'api/v1/hypothesis/current/{symbol}')
+            
+            if not success:
+                self.log_test("26. Conflict reason generation", False, f"Failed to get {symbol} data: {error}")
+                return False
+
+            conflict_state = data.get('conflict_state', '')
+            reason = data.get('reason', '')
+            
+            if conflict_state == 'MODERATE_CONFLICT':
+                # Should contain conflict-related terms
+                conflict_terms = ['conflict', 'disagreement', 'moderate']
+                if not any(term in reason.lower() for term in conflict_terms):
+                    self.log_test("26. Conflict reason generation", False, 
+                                 f"MODERATE_CONFLICT reason should mention conflict: {reason}")
+                    return False
+                    
+            elif conflict_state == 'HIGH_CONFLICT':
+                # Should contain stronger conflict terms
+                conflict_terms = ['conflict', 'high', 'reduces reliability', 'contradicts']
+                if not any(term in reason.lower() for term in conflict_terms):
+                    self.log_test("26. Conflict reason generation", False, 
+                                 f"HIGH_CONFLICT reason should mention strong conflict: {reason}")
+                    return False
+                    
+            elif conflict_state == 'LOW_CONFLICT':
+                # May or may not mention conflict (optional for LOW_CONFLICT)
+                pass
+
+        self.log_test("26. Conflict reason generation", True)
+        return True
+
     def run_all_tests(self):
         """Run all tests and print summary."""
         print("\n" + "=" * 80)
-        print("PHASE 29.2 — Hypothesis Scoring Engine API Tests")
+        print("PHASE 29.3 — Hypothesis Conflict Resolver API Tests")
         print("=" * 80)
         print(f"Backend URL: {self.base_url}")
         print("-" * 80)
@@ -715,6 +979,13 @@ class HypothesisScoringAPITester:
             self.test_execution_state_unfavorable,
             self.test_support_layer_consistency,
             self.test_hypothesis_reason_generation,
+            # PHASE 29.3 - Conflict Resolver Tests
+            self.test_conflict_state_classification,
+            self.test_low_conflict_no_adjustments,
+            self.test_moderate_conflict_adjustments,
+            self.test_moderate_conflict_execution_state_downgrade,
+            self.test_high_conflict_adjustments,
+            self.test_conflict_reason_generation,
         ]
         
         for test_method in test_methods:

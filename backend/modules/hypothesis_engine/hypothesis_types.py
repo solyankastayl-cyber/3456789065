@@ -36,6 +36,9 @@ DirectionalBias = Literal["LONG", "SHORT", "NEUTRAL"]
 
 ExecutionState = Literal["FAVORABLE", "CAUTIOUS", "UNFAVORABLE"]
 
+# PHASE 29.3 — Conflict State
+ConflictStateType = Literal["LOW_CONFLICT", "MODERATE_CONFLICT", "HIGH_CONFLICT"]
+
 
 # ══════════════════════════════════════════════════════════════
 # Constants — Scoring Weights
@@ -62,6 +65,9 @@ class MarketHypothesis(BaseModel):
     - structural_score: How market-logically sound is the idea
     - execution_score: How safe is it to trade now
     - conflict_score: How much do layers contradict each other
+    
+    PHASE 29.3 additions:
+    - conflict_state: Classification of conflict level (LOW/MODERATE/HIGH)
     """
     symbol: str
 
@@ -73,8 +79,11 @@ class MarketHypothesis(BaseModel):
     structural_score: float = Field(default=0.0, ge=0.0, le=1.0)
     execution_score: float = Field(default=0.0, ge=0.0, le=1.0)
     conflict_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    
+    # PHASE 29.3 — Conflict state classification
+    conflict_state: ConflictStateType = Field(default="LOW_CONFLICT")
 
-    # Derived from structural + execution scores
+    # Derived from structural + execution scores (adjusted by conflict resolver)
     confidence: float = Field(ge=0.0, le=1.0)
     reliability: float = Field(ge=0.0, le=1.0)
 
@@ -84,7 +93,7 @@ class MarketHypothesis(BaseModel):
     microstructure_support: float = Field(ge=0.0, le=1.0)
     macro_fractal_support: float = Field(ge=0.0, le=1.0)
 
-    # PHASE 29.2 — Execution state now derived from execution_score
+    # PHASE 29.2/29.3 — Execution state now derived from execution_score and conflict
     execution_state: ExecutionState
 
     created_at: datetime = Field(default_factory=datetime.utcnow)

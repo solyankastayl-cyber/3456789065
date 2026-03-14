@@ -38,6 +38,8 @@ async def get_current_hypothesis(symbol: str):
     - structural_score
     - execution_score
     - conflict_score
+    
+    PHASE 29.3: Returns conflict_state (LOW/MODERATE/HIGH)
     """
     engine = get_hypothesis_engine()
 
@@ -56,7 +58,9 @@ async def get_current_hypothesis(symbol: str):
         "structural_score": hypothesis.structural_score,
         "execution_score": hypothesis.execution_score,
         "conflict_score": hypothesis.conflict_score,
-        # Derived
+        # PHASE 29.3 conflict state
+        "conflict_state": hypothesis.conflict_state,
+        # Derived (adjusted by conflict resolver)
         "confidence": hypothesis.confidence,
         "reliability": hypothesis.reliability,
         # Support layers
@@ -64,7 +68,7 @@ async def get_current_hypothesis(symbol: str):
         "regime_support": hypothesis.regime_support,
         "microstructure_support": hypothesis.microstructure_support,
         "macro_fractal_support": hypothesis.macro_fractal_support,
-        # Execution
+        # Execution (adjusted by conflict resolver)
         "execution_state": hypothesis.execution_state,
         "reason": hypothesis.reason,
         "created_at": hypothesis.created_at.isoformat(),
@@ -149,6 +153,7 @@ async def recompute_hypothesis(symbol: str):
     Regenerates hypothesis from all intelligence layers.
     
     PHASE 29.2: Returns new scoring components.
+    PHASE 29.3: Returns conflict_state.
     """
     try:
         engine = get_hypothesis_engine()
@@ -169,7 +174,9 @@ async def recompute_hypothesis(symbol: str):
             "structural_score": hypothesis.structural_score,
             "execution_score": hypothesis.execution_score,
             "conflict_score": hypothesis.conflict_score,
-            # Derived
+            # PHASE 29.3 conflict state
+            "conflict_state": hypothesis.conflict_state,
+            # Derived (adjusted)
             "confidence": hypothesis.confidence,
             "reliability": hypothesis.reliability,
             # Support layers
@@ -177,7 +184,7 @@ async def recompute_hypothesis(symbol: str):
             "regime_support": hypothesis.regime_support,
             "microstructure_support": hypothesis.microstructure_support,
             "macro_fractal_support": hypothesis.macro_fractal_support,
-            # Execution
+            # Execution (adjusted)
             "execution_state": hypothesis.execution_state,
             "reason": hypothesis.reason,
             "computed_at": datetime.now(timezone.utc).isoformat(),

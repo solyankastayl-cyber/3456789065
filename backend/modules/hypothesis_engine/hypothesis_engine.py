@@ -3,6 +3,7 @@ Hypothesis Engine — Core Engine
 
 PHASE 29.1 — Hypothesis Contract + Core Engine
 PHASE 29.2 — Hypothesis Scoring Engine Integration
+PHASE 29.3 — Hypothesis Conflict Resolver Integration
 
 Features:
 - Generates hypothesis candidates from intelligence layer signals
@@ -15,6 +16,11 @@ PHASE 29.2 additions:
 - structural_score: idea quality
 - execution_score: execution safety
 - conflict_score: layer disagreement
+
+PHASE 29.3 additions:
+- conflict_state: LOW/MODERATE/HIGH classification
+- Automatic confidence/reliability reduction on conflict
+- Execution state downgrade on conflict
 """
 
 import math
@@ -34,6 +40,11 @@ from .hypothesis_types import (
 from .hypothesis_scoring_engine import (
     HypothesisScoringEngine,
     get_hypothesis_scoring_engine,
+)
+from .hypothesis_conflict_resolver import (
+    HypothesisConflictResolver,
+    get_hypothesis_conflict_resolver,
+    ConflictState,
 )
 
 
@@ -371,8 +382,9 @@ class HypothesisEngine:
         2. Score each candidate
         3. Select best
         4. Compute confidence / reliability using scoring engine
-        5. Map execution state
-        6. Build MarketHypothesis
+        5. Apply conflict resolver (PHASE 29.3)
+        6. Map execution state
+        7. Build MarketHypothesis
         
         PHASE 29.2: Uses HypothesisScoringEngine for:
         - structural_score
@@ -381,6 +393,12 @@ class HypothesisEngine:
         - confidence (derived)
         - reliability (derived)
         - execution_state (derived from execution_score)
+        
+        PHASE 29.3: Uses HypothesisConflictResolver for:
+        - conflict_state classification
+        - confidence adjustment on conflict
+        - reliability adjustment on conflict
+        - execution_state downgrade on conflict
         """
         # Generate candidates
         candidates = self.generate_candidates(layers)
@@ -397,12 +415,31 @@ class HypothesisEngine:
             transition_state=transition_state,
         )
 
-        # Generate enhanced reason
-        reason = scoring_engine.generate_enhanced_reason(
+        # Generate base reason
+        base_reason = scoring_engine.generate_enhanced_reason(
             hypothesis_type=best.hypothesis_type,
             scores=scores,
             layers=layers,
         )
+
+        # PHASE 29.3: Apply conflict resolver
+        conflict_resolver = get_hypothesis_conflict_resolver()
+        resolution = conflict_resolver.resolve(
+            conflict_score=scores["conflict_score"],
+            confidence=scores["confidence"],
+            reliability=scores["reliability"],
+            execution_state=scores["execution_state"],
+            alpha_support=best.alpha_support,
+            regime_support=best.regime_support,
+            microstructure_support=best.microstructure_support,
+            hypothesis_type=best.hypothesis_type,
+        )
+
+        # Combine reason with conflict suffix
+        if resolution.reason_suffix:
+            final_reason = f"{base_reason} — {resolution.reason_suffix}"
+        else:
+            final_reason = base_reason
 
         hypothesis = MarketHypothesis(
             symbol=symbol,
@@ -412,16 +449,19 @@ class HypothesisEngine:
             structural_score=scores["structural_score"],
             execution_score=scores["execution_score"],
             conflict_score=scores["conflict_score"],
-            confidence=scores["confidence"],
-            reliability=scores["reliability"],
+            # PHASE 29.3 conflict state
+            conflict_state=resolution.conflict_state.value,
+            # Adjusted by conflict resolver
+            confidence=resolution.adjusted_confidence,
+            reliability=resolution.adjusted_reliability,
             # Layer support
             alpha_support=best.alpha_support,
             regime_support=best.regime_support,
             microstructure_support=best.microstructure_support,
             macro_fractal_support=best.macro_support,
-            # Execution state from execution_score
-            execution_state=scores["execution_state"],
-            reason=reason,
+            # Execution state adjusted by conflict resolver
+            execution_state=resolution.adjusted_execution_state,
+            reason=final_reason,
         )
 
         # Cache
