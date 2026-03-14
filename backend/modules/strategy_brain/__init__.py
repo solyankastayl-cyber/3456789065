@@ -1,36 +1,31 @@
 """
-PHASE 19.1 — Strategy Brain Module
-==================================
-Strategy-level management layer.
+Strategy Brain
 
-Manages which strategies should be:
-- ACTIVE
-- REDUCED  
-- DISABLED
+PHASE 29.5 — Strategy Brain Integration with Hypothesis Engine
 
-Based on market conditions, regime, ecology, and interactions.
+Connects Hypothesis Engine with Strategy Selection.
 """
 
-from modules.strategy_brain.strategy_types import (
-    StrategyType,
-    StrategyState,
-    StrategyStateEnum,
-    RiskProfile,
+from .strategy_brain_engine import (
+    StrategyBrainEngine,
+    get_strategy_brain,
 )
-from modules.strategy_brain.strategy_registry import (
-    STRATEGY_REGISTRY,
-    get_strategy_config,
-)
-from modules.strategy_brain.strategy_state_engine import (
-    get_strategy_state_engine,
+from .strategy_routes import router as strategy_router
+from .strategy_types import (
+    StrategyDecision,
+    StrategySummary,
+    StrategyCandidate,
+    HYPOTHESIS_STRATEGY_MAP,
+    AVAILABLE_STRATEGIES,
 )
 
 __all__ = [
-    "StrategyType",
-    "StrategyState", 
-    "StrategyStateEnum",
-    "RiskProfile",
-    "STRATEGY_REGISTRY",
-    "get_strategy_config",
-    "get_strategy_state_engine",
+    "StrategyBrainEngine",
+    "get_strategy_brain",
+    "strategy_router",
+    "StrategyDecision",
+    "StrategySummary",
+    "StrategyCandidate",
+    "HYPOTHESIS_STRATEGY_MAP",
+    "AVAILABLE_STRATEGIES",
 ]
