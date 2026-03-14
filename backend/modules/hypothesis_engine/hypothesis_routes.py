@@ -2,16 +2,19 @@
 Hypothesis Engine — Routes
 
 PHASE 29.1 — API endpoints for market hypothesis.
+PHASE 29.4 — Extended registry endpoints with stats and recent.
 
 Endpoints:
 - GET  /api/v1/hypothesis/current/{symbol}
 - GET  /api/v1/hypothesis/history/{symbol}
 - GET  /api/v1/hypothesis/summary/{symbol}
+- GET  /api/v1/hypothesis/stats/{symbol}        (PHASE 29.4)
+- GET  /api/v1/hypothesis/recent                (PHASE 29.4)
 - POST /api/v1/hypothesis/recompute/{symbol}
 """
 
-from fastapi import APIRouter, HTTPException
-from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, Query
+from typing import Dict, Any, List
 from datetime import datetime, timezone
 
 from .hypothesis_engine import (
@@ -79,6 +82,8 @@ async def get_current_hypothesis(symbol: str):
 async def get_hypothesis_history(symbol: str, limit: int = 50):
     """
     Get hypothesis history for symbol.
+    
+    PHASE 29.4: Extended with all scoring fields.
     """
     registry = get_hypothesis_registry()
     history = await registry.get_history(symbol.upper(), limit=limit)
@@ -90,9 +95,17 @@ async def get_hypothesis_history(symbol: str, limit: int = 50):
             {
                 "hypothesis_type": r.hypothesis_type,
                 "directional_bias": r.directional_bias,
+                # PHASE 29.2/29.3 scores
+                "structural_score": r.structural_score,
+                "execution_score": r.execution_score,
+                "conflict_score": r.conflict_score,
+                "conflict_state": r.conflict_state,
+                # Core scores
                 "confidence": r.confidence,
                 "reliability": r.reliability,
                 "execution_state": r.execution_state,
+                # PHASE 29.4 price tracking
+                "price_at_creation": r.price_at_creation,
                 "created_at": r.created_at.isoformat(),
             }
             for r in history
@@ -194,3 +207,114 @@ async def recompute_hypothesis(symbol: str):
             status_code=500,
             detail=f"Recompute failed: {str(e)}",
         )
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# PHASE 29.4 — New Registry Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/stats/{symbol}", response_model=Dict[str, Any])
+async def get_hypothesis_stats(symbol: str):
+    """
+    Get comprehensive hypothesis statistics for symbol.
+    
+    PHASE 29.4: Full statistics with all scoring breakdowns.
+    
+    Returns:
+    - Total hypotheses count
+    - Directional breakdown (bullish/bearish/neutral)
+    - Type breakdown
+    - Conflict state breakdown
+    - Execution state breakdown
+    - Score averages
+    - Recent bias trend
+    """
+    registry = get_hypothesis_registry()
+    stats = await registry.get_hypothesis_stats(symbol.upper())
+
+    return {
+        "symbol": stats.symbol,
+        "total_hypotheses": stats.total_hypotheses,
+        "directional": {
+            "bullish": stats.bullish,
+            "bearish": stats.bearish,
+            "neutral": stats.neutral,
+        },
+        "types": {
+            "bullish_continuation": stats.bullish_continuation,
+            "bearish_continuation": stats.bearish_continuation,
+            "breakout_forming": stats.breakout_forming,
+            "range_mean_reversion": stats.range_mean_reversion,
+            "no_edge": stats.no_edge,
+        },
+        "conflict_states": {
+            "low": stats.low_conflict,
+            "moderate": stats.moderate_conflict,
+            "high": stats.high_conflict,
+        },
+        "execution_states": {
+            "favorable": stats.favorable,
+            "cautious": stats.cautious,
+            "unfavorable": stats.unfavorable,
+        },
+        "averages": {
+            "confidence": stats.avg_confidence,
+            "reliability": stats.avg_reliability,
+            "structural_score": stats.avg_structural_score,
+            "execution_score": stats.avg_execution_score,
+            "conflict_score": stats.avg_conflict_score,
+        },
+        "recent_bias_trend": stats.recent_bias_trend,
+    }
+
+
+@router.get("/recent", response_model=Dict[str, Any])
+async def get_recent_hypotheses(limit: int = Query(default=100, le=500)):
+    """
+    Get recent hypotheses across all symbols.
+    
+    PHASE 29.4: System-wide hypothesis monitoring.
+    
+    Returns most recent hypotheses sorted by creation time.
+    """
+    registry = get_hypothesis_registry()
+    recent = await registry.get_recent_hypotheses(limit=limit)
+
+    return {
+        "total": len(recent),
+        "limit": limit,
+        "hypotheses": [
+            {
+                "symbol": r.symbol,
+                "hypothesis_type": r.hypothesis_type,
+                "directional_bias": r.directional_bias,
+                "structural_score": r.structural_score,
+                "execution_score": r.execution_score,
+                "conflict_score": r.conflict_score,
+                "conflict_state": r.conflict_state,
+                "confidence": r.confidence,
+                "reliability": r.reliability,
+                "execution_state": r.execution_state,
+                "price_at_creation": r.price_at_creation,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in recent
+        ],
+    }
+
+
+@router.get("/symbols", response_model=Dict[str, Any])
+async def get_all_symbols():
+    """
+    Get list of all symbols with hypothesis history.
+    
+    PHASE 29.4: Useful for discovering tracked symbols.
+    """
+    registry = get_hypothesis_registry()
+    symbols = await registry.get_all_symbols()
+
+    return {
+        "total": len(symbols),
+        "symbols": symbols,
+    }

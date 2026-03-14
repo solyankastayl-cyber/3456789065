@@ -4,6 +4,7 @@ Hypothesis Engine
 PHASE 29.1 — Hypothesis Contract + Core Engine
 PHASE 29.2 — Hypothesis Scoring Engine
 PHASE 29.3 — Hypothesis Conflict Resolver
+PHASE 29.4 — Hypothesis Registry / History
 
 Generates market hypotheses from intelligence layers:
 - AlphaFactory
@@ -20,6 +21,12 @@ Conflict Resolution (29.3):
 - conflict_state: LOW/MODERATE/HIGH classification
 - Automatic confidence/reliability adjustment
 - Execution state downgrade on high conflict
+
+Registry / History (29.4):
+- Persistent MongoDB storage
+- Full hypothesis history tracking
+- Statistics and analytics
+- Price tracking for outcome analysis
 """
 
 from .hypothesis_engine import (
@@ -39,6 +46,9 @@ from .hypothesis_conflict_resolver import (
 from .hypothesis_registry import (
     HypothesisRegistry,
     get_hypothesis_registry,
+    HypothesisHistoryRecordExtended,
+    HypothesisStats,
+    HypothesisOutcome,
 )
 from .hypothesis_routes import router as hypothesis_router
 from .hypothesis_types import (
@@ -60,6 +70,9 @@ __all__ = [
     "ConflictResolutionResult",
     "HypothesisRegistry",
     "get_hypothesis_registry",
+    "HypothesisHistoryRecordExtended",
+    "HypothesisStats",
+    "HypothesisOutcome",
     "hypothesis_router",
     "MarketHypothesis",
     "HypothesisCandidate",
